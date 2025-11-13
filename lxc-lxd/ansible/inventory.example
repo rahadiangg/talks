@@ -1,0 +1,7 @@
+[lxd_servers]
+100.111.182.104
+
+[lxd_servers:vars]
+ansible_user=rahadiangg
+ansible_password=qwerty
+ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'

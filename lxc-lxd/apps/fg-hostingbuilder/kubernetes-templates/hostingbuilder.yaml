@@ -1,0 +1,58 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{.JobName}}
+  namespace: {{.Namespace}}
+  labels:
+    app: hostingbuilder
+    job-name: {{.JobName}}
+spec:
+  completions: 1
+  parallelism: 1
+  backoffLimit: 0  # Do not retry on failure
+  ttlSecondsAfterFinished: 300
+  template:
+    metadata:
+      labels:
+        app: hostingbuilder
+        job-name: {{.JobName}}
+    spec:
+      imagePullSecrets:
+      - name: imagepull-secret
+      containers:
+      - name: hostingbuilder
+        imagePullPolicy: {{.ImagePullPolicy}}
+        image: {{.HostingBuilderImage}}
+        env:
+        - name: LXD_HOST
+          value: "{{.LXD_HOST}}"
+        - name: ANSIBLE_USER
+          value: "{{.ANSIBLE_USER}}"
+        - name: ANSIBLE_PASSWORD
+          value: "{{.ANSIBLE_PASSWORD}}"
+        - name: SUBDOMAIN
+          value: "{{.SUBDOMAIN}}"
+        - name: EMAIL
+          value: "{{.EMAIL}}"
+        - name: DB_ROOT_HOST
+          value: "{{.DB_ROOT_HOST}}"
+        - name: DB_ROOT_USER
+          value: "{{.DB_ROOT_USER}}"
+        - name: DB_ROOT_PASSWORD
+          value: "{{.DB_ROOT_PASSWORD}}"
+        - name: WORDPRESS_THEME
+          value: "{{.WORDPRESS_THEME}}"
+        - name: ACCESS_KEY
+          value: "{{.ACCESS_KEY}}"
+        - name: SECRET_KEY
+          value: "{{.SECRET_KEY}}"
+        - name: TOPIC_URN
+          value: "{{.TOPIC_URN}}"
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "2Gi"
+            cpu: "1000m"
+      restartPolicy: Never

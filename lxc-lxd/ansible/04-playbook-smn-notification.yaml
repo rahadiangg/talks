@@ -1,0 +1,242 @@
+---
+- name: Post notification to Huawei Cloud SMN topic using hcloud CLI
+  hosts: all
+  gather_facts: true
+  tasks:
+    - name: Set dynamic variables
+      ansible.builtin.set_fact:
+        # SMN configuration
+        topic_urn: "{{ topic_urn | default('urn:smn:ap-southeast-4:34a2a5f25e0f437c9fb5e19f29c8a529:test') }}"
+        
+        # hcloud CLI configuration
+        hcloud_path: "{{ hcloud_path | default('hcloud') }}"
+        
+        # Authentication configuration
+        access_key: "{{ access_key | default(lookup('env', 'ACCESS_KEY')) }}"
+        secret_key: "{{ secret_key | default(lookup('env', 'SECRET_KEY')) }}"
+        region: "{{ region | default('ap-southeast-4') }}"
+        
+        # Message configuration (all configurable)
+        message_type: "{{ message_type | default('email') }}"
+        message_subject: "{{ message_subject | default('Huawei Cloud Ansible Playbook Deployment Success Notification') }}"
+        message_body: "{{ message_body | default('The Ansible playbook deployment has been successfully completed on Huawei Cloud.') }}"
+        message_receiver: "{{ message_receiver | default('receiver_email@example.com') }}"
+        
+
+    - name: Check if hcloud CLI is available in PATH
+      command: which {{ hcloud_path }}
+      register: hcloud_check
+      failed_when: false
+      changed_when: false
+
+    - name: Detect operating system
+      set_fact:
+        os_type: "{{ ansible_system | lower }}"
+        arch_type: "{{ ansible_architecture }}"
+      when: hcloud_check.rc != 0
+
+    - name: Install hcloud CLI on macOS
+      block:
+        - name: Download hcloud for macOS (AMD64)
+          get_url:
+            url: "https://ap-southeast-3-hwcloudcli.obs.ap-southeast-3.myhuaweicloud.com/cli/latest/huaweicloud-cli-mac-amd64.tar.gz"
+            dest: "/tmp/huaweicloud-cli-mac-amd64.tar.gz"
+            mode: '0644'
+          when: arch_type in ['x86_64', 'amd64']
+
+        - name: Download hcloud for macOS (ARM64)
+          get_url:
+            url: "https://ap-southeast-3-hwcloudcli.obs.ap-southeast-3.myhuaweicloud.com/cli/latest/huaweicloud-cli-mac-arm64.tar.gz"
+            dest: "/tmp/huaweicloud-cli-mac-arm64.tar.gz"
+            mode: '0644'
+          when: arch_type in ['aarch64', 'arm64']
+
+        - name: Extract hcloud binary (AMD64)
+          unarchive:
+            src: "/tmp/huaweicloud-cli-mac-amd64.tar.gz"
+            dest: "/tmp"
+            remote_src: yes
+          when: arch_type in ['x86_64', 'amd64']
+
+        - name: Extract hcloud binary (ARM64)
+          unarchive:
+            src: "/tmp/huaweicloud-cli-mac-arm64.tar.gz"
+            dest: "/tmp"
+            remote_src: yes
+          when: arch_type in ['aarch64', 'arm64']
+
+        - name: Move hcloud binary to /usr/local/bin
+          copy:
+            src: "/tmp/hcloud"
+            dest: "/usr/local/bin/hcloud"
+            mode: '0755'
+            remote_src: yes
+          become: yes
+
+        - name: Update hcloud_path to installed location
+          set_fact:
+            hcloud_path: "/usr/local/bin/hcloud"
+
+        - name: Clean up downloaded files (AMD64)
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "/tmp/huaweicloud-cli-mac-amd64.tar.gz"
+            - "/tmp/hcloud"
+          when: arch_type in ['x86_64', 'amd64']
+
+        - name: Clean up downloaded files (ARM64)
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "/tmp/huaweicloud-cli-mac-arm64.tar.gz"
+            - "/tmp/hcloud"
+          when: arch_type in ['aarch64', 'arm64']
+      when: hcloud_check.rc != 0 and os_type == 'darwin'
+
+    - name: Install hcloud CLI on Linux
+      block:
+        - name: Download hcloud for Linux (x86_64)
+          get_url:
+            url: "https://ap-southeast-3-hwcloudcli.obs.ap-southeast-3.myhuaweicloud.com/cli/latest/huaweicloud-cli-linux-amd64.tar.gz"
+            dest: "/tmp/huaweicloud-cli-linux-amd64.tar.gz"
+            mode: '0644'
+          when: arch_type in ['x86_64', 'amd64']
+
+        - name: Download hcloud for Linux (ARM64)
+          get_url:
+            url: "https://ap-southeast-3-hwcloudcli.obs.ap-southeast-3.myhuaweicloud.com/cli/latest/huaweicloud-cli-linux-arm64.tar.gz"
+            dest: "/tmp/huaweicloud-cli-linux-arm64.tar.gz"
+            mode: '0644'
+          when: arch_type in ['aarch64', 'arm64']
+
+        - name: Extract hcloud binary (x86_64)
+          unarchive:
+            src: "/tmp/huaweicloud-cli-linux-amd64.tar.gz"
+            dest: "/tmp"
+            remote_src: yes
+          when: arch_type in ['x86_64', 'amd64']
+
+        - name: Extract hcloud binary (ARM64)
+          unarchive:
+            src: "/tmp/huaweicloud-cli-linux-arm64.tar.gz"
+            dest: "/tmp"
+            remote_src: yes
+          when: arch_type in ['aarch64', 'arm64']
+
+        - name: Move hcloud binary to /usr/local/bin
+          copy:
+            src: "/tmp/hcloud"
+            dest: "/usr/local/bin/hcloud"
+            mode: '0755'
+            remote_src: yes
+          become: yes
+
+        - name: Update hcloud_path to installed location
+          set_fact:
+            hcloud_path: "/usr/local/bin/hcloud"
+
+        - name: Clean up downloaded files (x86_64)
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "/tmp/huaweicloud-cli-linux-amd64.tar.gz"
+            - "/tmp/hcloud"
+          when: arch_type in ['x86_64', 'amd64']
+
+        - name: Clean up downloaded files (ARM64)
+          file:
+            path: "{{ item }}"
+            state: absent
+          loop:
+            - "/tmp/huaweicloud-cli-linux-arm64.tar.gz"
+            - "/tmp/hcloud"
+          when: arch_type in ['aarch64', 'arm64']
+      when: hcloud_check.rc != 0 and os_type == 'linux'
+
+    - name: Fail if hcloud CLI cannot be installed
+      fail:
+        msg: "hcloud CLI (KooCLI) could not be installed. Unsupported OS: {{ os_type }}"
+      when: hcloud_check.rc != 0 and os_type not in ['darwin', 'linux']
+
+    - name: Validate required authentication variables
+      assert:
+        that:
+          - access_key != ""
+          - secret_key != ""
+          - topic_urn != ""
+          - topic_urn is match("^urn:smn:[^:]+:[^:]+:[^:]+$")
+        fail_msg: "Required authentication variables are missing: access_key, secret_key, topic_urn (format: urn:smn:region:account_id:topic_name)"
+
+    - name: Check hcloud version
+      shell: echo "y" | {{ hcloud_path }} version
+      register: hcloud_version
+      changed_when: false
+      async: 30
+      poll: 2
+
+    - name: Display hcloud version
+      debug:
+        msg: "Using {{ hcloud_version.stdout }}"
+
+    - name: Create JSON message content
+      set_fact:
+        json_message_content:
+          type: "{{ message_type }}"
+          subject: "{{ message_subject }}"
+          message: "{{ message_body }}"
+          receiver: "{{ message_receiver }}"
+
+    - name: Convert message to JSON string
+      set_fact:
+        full_message_content: "{{ json_message_content | to_json }}"
+
+    - name: Send SMN notification using hcloud CLI with AK/SK authentication
+      shell: |
+        echo "y" | {{ hcloud_path }} SMN PublishMessage \
+        --cli-access-key="{{ access_key }}" \
+        --cli-secret-key="{{ secret_key }}" \
+        --cli-region="{{ region }}" \
+        --topic_urn="{{ topic_urn }}" \
+        --subject="{{ message_subject }}" \
+        --message='{{ full_message_content }}'
+      register: smn_result
+      retries: 3
+      delay: 5
+      async: 60
+      poll: 2
+
+    - name: Check if SMN notification was successful
+      set_fact:
+        smn_success: "{{ (smn_result.rc == 0) and ('message_id' in smn_result.stdout) and ('USE_ERROR' not in smn_result.stdout) and ('Failed to obtain' not in smn_result.stdout) }}"
+
+    - name: Display SMN notification result
+      debug:
+        msg: 
+          - "SMN notification sent successfully using hcloud CLI"
+          - "Command output: {{ smn_result.stdout }}"
+          - "Subject: {{ message_subject }}"
+          - "Topic: {{ topic_urn }}"
+      when: smn_success | bool
+
+    - name: Handle SMN notification failure
+      debug:
+        msg:
+          - "SMN notification failed"
+          - "Error output: {{ smn_result.stdout }}"
+          - "Error details: {{ smn_result.stderr }}"
+          - "Return code: {{ smn_result.rc }}"
+      when: not (smn_success | bool)
+
+    - name: Fail on SMN error
+      fail:
+        msg: "Failed to send SMN notification via hcloud CLI: {{ smn_result.stdout }}"
+      when: not (smn_success | bool)
+
+  handlers:
+    - name: Log notification failure
+      debug:
+        msg: "SMN notification failed - check logs for details"

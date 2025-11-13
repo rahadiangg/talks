@@ -1,0 +1,25 @@
+- name: Configure Nginx reverse proxy
+  hosts: all
+  become: true
+  # vars:
+  #   subdomain_name: "test"
+  #   lxc_web_port: 8093
+  
+  tasks:
+    - name: Set dynamic variables
+      ansible.builtin.set_fact:
+        subdomain_name: "{{ subdomain_name }}"
+        lxc_web_port: "{{ lxc_web_port }}"
+
+    - name: Create nginx configuration for reverse proxy
+      ansible.builtin.template:
+        src: templates/nginx-reverse-proxy.conf.j2
+        dest: /etc/nginx/sites-enabled/{{ subdomain_name }}.conf
+      notify:
+        - Reload Nginx
+  
+  handlers:
+    - name: Reload Nginx
+      ansible.builtin.service:
+        name: nginx
+        state: reloaded

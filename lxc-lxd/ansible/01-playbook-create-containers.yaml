@@ -1,0 +1,163 @@
+- name: Create LXD containers with SSH access
+  hosts: all
+  # vars:
+    # base_container_ssh_port: 2200
+    # container_name: "web-server2"
+    # job_id: "{{ (ansible_date_time.epoch) }}"
+    # base_container_ssh_port: "{{ base_container_ssh_port | default(2200) }}"
+    # container_name: "{{ container_name | default('web-server-' + ansible_date_time.iso8601_basic_short) }}"
+    # job_id: "{{ job_id | default(ansible_date_time.epoch) }}"
+
+  tasks:
+    - name: Set dynamic variables
+      ansible.builtin.set_fact:
+        base_container_ssh_port: "{{ base_container_ssh_port | default(2200) }}"
+        container_name: "{{ container_name | default('web-server-' + ansible_date_time.iso8601_basic_short) }}"
+        job_id: "{{ job_id | default(ansible_date_time.epoch) }}"
+
+    - name: Create web server container
+      community.general.lxd_container:
+        name: "{{ container_name }}"
+        architecture: x86_64
+        type: container
+        state: started
+        timeout: 100
+        config:
+          limits.cpu: "1"
+          limits.memory: "1GiB"
+          user.user-data: |
+            #cloud-config
+            package_update: true
+            packages:
+              - python3
+              - python3-apt
+              - openssh-server
+              - net-tools
+            ssh_pwauth: true
+            users:
+              - name: ansible
+                sudo: ALL=(ALL) NOPASSWD:ALL
+                shell: /bin/bash
+                passwd: '$6$ansible$mCgBlaGAwKNW0.kcWJ0mcHTuI8pz7MYXHkgfLo4VYkUC406B9J9Ee1cXNq.52xZcbQmGqoTlsoTcnbnL.SCJg/' # ansible123
+                lock_passwd: false
+              - name: demohuawei
+                sudo: ALL=(ALL) NOPASSWD:ALL
+                shell: /bin/bash
+                passwd: '$6$MVRbLTSkyGMt9wh0$i9.Ejqw.k5XfBRXYqFh7A81YtAo4.d8UAt3K..qlgYMWVVRJ0NXgc8Prm3JNczMhcbVEa.v3efbnzPDgIwCsv0'
+                lock_passwd: false
+            runcmd:
+              - systemctl enable ssh
+              - systemctl start ssh
+        source:
+          type: image
+          mode: pull
+          server: https://cloud-images.ubuntu.com/releases/
+          protocol: simplestreams
+          alias: "24.04"
+        profiles:
+          - default
+        project: default
+        wait_for_container: true
+
+    - name: Wait for container initialization
+      pause:
+        seconds: 15
+
+    - name: Check if container already has SSH proxy configured
+      ansible.builtin.shell: lxc config show {{ container_name }} | grep -A2 "ssh-proxy:" | grep "listen:" | sed 's/.*://' || echo ""
+      register: existing_port
+      ignore_errors: true
+
+    - name: Find available SSH port with job-specific range
+      ansible.builtin.shell: |
+        # Use job_id to create unique port range to avoid race conditions
+        start_port=$((2201 + ({{ job_id }} % 50) * 2))
+        end_port=$((start_port + 20))
+        for port in $(seq $start_port $end_port); do
+          if ! netstat -tuln | grep -q ":$port "; then
+            echo $port
+            break
+          fi
+        done
+      register: new_port
+      when: existing_port.stdout == ""
+
+    - name: Set SSH port (use existing or new)
+      set_fact:
+        container_ssh_port: "{{ existing_port.stdout if existing_port.stdout != '' else new_port.stdout }}"
+
+    - name: Calculate web port based on SSH port
+      set_fact:
+        container_web_port: "{{ '80' + container_ssh_port[2:] }}"
+
+    - name: Setup SSH port forwarding using device proxy
+      ansible.builtin.shell: |
+        lxc config device add {{ container_name }} ssh-proxy proxy listen=tcp:0.0.0.0:{{ container_ssh_port }} connect=tcp:127.0.0.1:22 2>/dev/null ||
+        lxc config device set {{ container_name }} ssh-proxy listen=tcp:0.0.0.0:{{ container_ssh_port }}
+      when: existing_port.stdout == ""
+
+    - name: Setup web port forwarding using device proxy
+      ansible.builtin.shell: |
+        lxc config device add {{ container_name }} web-proxy proxy listen=tcp:0.0.0.0:{{ container_web_port }} connect=tcp:127.0.0.1:80 2>/dev/null ||
+        lxc config device set {{ container_name }} web-proxy listen=tcp:0.0.0.0:{{ container_web_port }}
+    
+    - name: Create job-specific host inventory for reverse proxy
+      ansible.builtin.copy:
+        content: |
+          # inventory for {{ inventory_hostname }}
+          # Created: {{ ansible_date_time.iso8601 }}
+          # Job ID: {{ job_id }}
+          
+          [lxd_servers]
+          {{ inventory_hostname }} ansible_port=22 ansible_user={{ ansible_user }} ansible_password={{ ansible_password }} ansible_become_password={{ ansible_password }} ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+          
+          [lxd_servers:vars]
+          ansible_python_interpreter=/usr/bin/python3
+          ansible_become=yes
+          ansible_become_method=sudo
+          subdomain_name={{ subdomain_name }}
+          lxc_web_port={{ container_web_port }}
+        dest: "./inventory-reverse-proxy"
+        mode: '0644'
+      delegate_to: localhost
+
+    - name: Create job-specific container inventory
+      ansible.builtin.copy:
+        content: |
+          # Container inventory for {{ container_name }}
+          # Created: {{ ansible_date_time.iso8601 }}
+          # Job ID: {{ job_id }}
+          
+          [containers]
+          {{ container_name }} ansible_host={{ inventory_hostname }} ansible_port={{ container_ssh_port }} ansible_user=ansible ansible_password=ansible123 ansible_ssh_common_args='-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null'
+          
+          [containers:vars]
+          ansible_python_interpreter=/usr/bin/python3
+          ansible_become=yes
+          ansible_become_method=sudo
+          subdomain_name={{ subdomain_name }}
+        dest: "./inventory-container"
+        mode: '0644'
+      delegate_to: localhost
+
+    - name: Save container connection info to file
+      ansible.builtin.copy:
+        content: |
+          CONTAINER_NAME={{ container_name }}
+          CONTAINER_SSH_PORT={{ container_ssh_port }}
+          CONTAINER_WEB_PORT={{ container_web_port }}
+          JOB_ID={{ job_id }}
+        dest: "./inventory-notification"
+        mode: '0644'
+      delegate_to: localhost
+
+    - name: Display connection info
+      ansible.builtin.debug:
+        msg:
+          - "Container created: {{ container_name }}"
+          - "SSH: ssh ansible@<host> -p {{ container_ssh_port }}"
+          - "Web: http://<host>:{{ container_web_port }}"
+          - "Port mapping: SSH {{ container_ssh_port }} → Web {{ container_web_port }}"
+          - "Port status: {{ 'Reused existing' if existing_port.stdout != '' else 'Created new' }}"
+          - "Inventory: ./container_inventory_{{ job_id }}"
+          - "Job ID: {{ job_id }}"

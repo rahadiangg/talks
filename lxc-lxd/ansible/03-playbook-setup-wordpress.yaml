@@ -1,0 +1,328 @@
+---
+- name: Setup WordPress with configurable options
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Set dynamic variables
+      ansible.builtin.set_fact:
+        # WordPress Configuration
+        wordpress_version: "{{ wordpress_version | default('6.8.3') }}"
+        wordpress_site_name: "{{ wordpress_site_name | default('My WordPress Site') }}"
+        wordpress_site_tagline: "{{ wordpress_site_tagline | default('My awesome website') }}"
+        wordpress_admin_user: "{{ wordpress_admin_user | default('admin') }}"
+        wordpress_admin_password: "{{ wordpress_admin_password | default('admin') }}"
+        wordpress_admin_email: "{{ wordpress_admin_email | default('admin@example.com') }}"
+        # Calculate web port using same logic as container creation: "80" + last 2 digits of SSH port
+        # For SSH port 2251, this becomes 8051 (80 + 51)
+        # wordpress_site_url: "http://{{ ansible_host }}:80{{ ansible_port | string | regex_replace('22', '') }}"
+        wordpress_site_url: "{{ wordpress_site_url | default('https://' + subdomain_name + '.onhuawei.cloud') }}"
+        
+        # Database Configuration
+        db_name: "{{ db_name | default('db_' + subdomain_name) }}"
+        db_user: "{{ db_user | default('wp_' + subdomain_name) }}"
+        db_password: "{{ db_password | default('wp_' + subdomain_name) }}"
+        db_host: "{{ db_host | default('127.0.0.1') }}"  # Use 127.0.0.1 to force TCP connection instead of socket
+        db_port: "{{ db_port | default('3306') }}"
+        
+        # MySQL Setup Configuration
+        setup_mysql: "{{ setup_mysql | default(false) }}"
+        mysql_version: "{{ mysql_version | default('8.0') }}"  # MySQL version to install
+        db_root_user: "{{ db_root_user | default('root') }}"
+        db_root_password: "{{ db_root_password | default('RootPassword123!') }}"
+        
+        # Web Server Configuration
+        nginx_version: "{{ nginx_version | default('1.24.0-2ubuntu7.5') }}"  # Current latest stable Nginx version
+        document_root: "{{ document_root | default('/var/www/html') }}"
+        deployment_mode: "{{ deployment_mode | default('reverse_proxy') }}"
+        
+        # WordPress Theme and Plugins
+        wordpress_theme: "{{ wordpress_theme | default('twentytwentyfour') }}"  # Default WordPress theme
+        wordpress_plugins: "{{ wordpress_plugins | default(['akismet', 'hello-dolly']) }}"
+        
+        # PHP Configuration
+        php_version: "{{ php_version | default('8.3') }}"
+        php_max_execution_time: "{{ php_max_execution_time | default('300') }}"
+        php_memory_limit: "{{ php_memory_limit | default('512M') }}"
+        php_upload_max_filesize: "{{ php_upload_max_filesize | default('64M') }}"
+        php_post_max_size: "{{ php_post_max_size | default('64M') }}"
+        
+        # SSL/Deployment Configuration
+        ssl_cert_path: "{{ ssl_cert_path | default('') }}"  # Only needed for direct_ssl
+        ssl_key_path: "{{ ssl_key_path | default('') }}"   # Only needed for direct_ssl
+        reverse_proxy_ips: "{{ reverse_proxy_ips | default(['10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16']) }}"
+
+    - name: Update package cache
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: Install base packages
+      apt:
+        name:
+          - curl
+          - wget
+          - unzip
+          - git
+        state: present
+
+    - name: Install MySQL client and Python MySQL library
+      apt:
+        name:
+          - mysql-client
+          - python3-pymysql
+        state: present
+
+    - name: Add MySQL APT repository
+      shell: |
+        wget https://dev.mysql.com/get/mysql-apt-config_0.8.32-1_all.deb
+        DEBIAN_FRONTEND=noninteractive dpkg -i mysql-apt-config_0.8.32-1_all.deb
+        apt-get update
+      when: setup_mysql
+      ignore_errors: yes
+
+    - name: Update apt cache after adding MySQL repository
+      apt:
+        update_cache: yes
+      when: setup_mysql
+
+    - name: Install MySQL server with specific version
+      apt:
+        name: "mysql-server-{{ mysql_version }}"
+        state: present
+      when: setup_mysql and mysql_version != ""
+
+    - name: Install MySQL server default version (when version not specified)
+      apt:
+        name: mysql-server
+        state: present
+      when: setup_mysql and mysql_version == ""
+
+    - name: Start and enable MySQL service
+      systemd:
+        name: mysql
+        state: started
+        enabled: yes
+      when: setup_mysql
+
+    - name: Set MySQL root password
+      shell: |
+        mysql -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{{ db_root_password }}'; FLUSH PRIVILEGES;"
+      when: setup_mysql
+      ignore_errors: yes
+
+    - name: Wait for MySQL service to be ready
+      wait_for:
+        port: "{{ db_port }}"
+        timeout: 60
+      when: setup_mysql
+
+    - name: Create WordPress database and user
+      shell: |
+        mysql -u {{ db_root_user }} -h {{ db_host }} -P {{ db_port }} -p{{ db_root_password }} -e "
+        CREATE DATABASE IF NOT EXISTS {{ db_name }};
+        CREATE USER IF NOT EXISTS '{{ db_user }}'@'%' IDENTIFIED BY '{{ db_password }}';
+        GRANT ALL PRIVILEGES ON {{ db_name }}.* TO '{{ db_user }}'@'%';
+        FLUSH PRIVILEGES;"
+
+    - name: Install Nginx with specific version
+      apt:
+        name: "nginx={{ nginx_version }}"
+        state: present
+      when: nginx_version != ""
+
+    - name: Install Nginx default version (when version not specified)
+      apt:
+        name: nginx
+        state: present
+      when: nginx_version == ""
+
+    - name: Install PHP-FPM and extensions with specific version
+      apt:
+        name:
+          - "php{{ php_version }}-fpm"
+          - "php{{ php_version }}-mysql"
+          - "php{{ php_version }}-curl"
+          - "php{{ php_version }}-gd"
+          - "php{{ php_version }}-xml"
+          - "php{{ php_version }}-mbstring"
+          - "php{{ php_version }}-zip"
+          - "php{{ php_version }}-intl"
+        state: present
+
+    - name: Configure PHP-FPM settings
+      lineinfile:
+        path: /etc/php/{{ php_version | default('8.3') }}/fpm/php.ini
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+      loop:
+        - { regexp: '^max_execution_time', line: 'max_execution_time = {{ php_max_execution_time | default("300") }}' }
+        - { regexp: '^memory_limit', line: 'memory_limit = {{ php_memory_limit | default("512M") }}' }
+        - { regexp: '^upload_max_filesize', line: 'upload_max_filesize = {{ php_upload_max_filesize | default("64M") }}' }
+        - { regexp: '^post_max_size', line: 'post_max_size = {{ php_post_max_size | default("64M") }}' }
+      notify: restart php-fpm
+
+    - name: Start and enable Nginx
+      systemd:
+        name: nginx
+        state: started
+        enabled: yes
+
+    - name: Start and enable PHP-FPM
+      systemd:
+        name: php{{ php_version | default('8.3') }}-fpm
+        state: started
+        enabled: yes
+
+    - name: Create document root directory
+      file:
+        path: "{{ document_root }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: Download WordPress
+      get_url:
+        url: "https://wordpress.org/wordpress-{{ wordpress_version }}.tar.gz"
+        dest: /tmp/wordpress-{{ wordpress_version }}.tar.gz
+
+    - name: Extract WordPress
+      unarchive:
+        src: /tmp/wordpress-{{ wordpress_version }}.tar.gz
+        dest: /tmp/
+        remote_src: yes
+
+    - name: Copy WordPress files
+      shell: cp -r /tmp/wordpress/* {{ document_root }}/
+      
+    - name: Set WordPress file permissions
+      file:
+        path: "{{ document_root }}"
+        owner: www-data
+        group: www-data
+        recurse: yes
+
+    - name: Generate WordPress salts
+      uri:
+        url: https://api.wordpress.org/secret-key/1.1/salt/
+        method: GET
+        return_content: yes
+      register: wp_salts
+
+    - name: Create WordPress configuration from template
+      template:
+        src: templates/wp-config.php.j2
+        dest: "{{ document_root }}/wp-config.php"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: Download WP-CLI
+      get_url:
+        url: "https://github.com/wp-cli/wp-cli/releases/download/v2.10.0/wp-cli-2.10.0.phar"
+        dest: "/usr/local/bin/wp"
+        mode: '0755'
+
+    - name: Make WP-CLI executable
+      file:
+        path: "/usr/local/bin/wp"
+        mode: '0755'
+
+    - name: Wait for web server to be ready
+      wait_for:
+        port: 80
+        timeout: 60
+
+    - name: Check if WordPress is installed in database
+      shell: sudo -u www-data wp core is-installed --path="{{ document_root }}"
+      register: wp_core_installed
+      failed_when: false
+      changed_when: false
+
+    - name: Install WordPress via WP-CLI
+      shell: >
+        sudo -u www-data wp core install
+        --url="{{ wordpress_site_url }}"
+        --title="{{ wordpress_site_name }}"
+        --admin_user="{{ wordpress_admin_user }}"
+        --admin_password="{{ wordpress_admin_password }}"
+        --admin_email="{{ wordpress_admin_email }}"
+        --path="{{ document_root }}"
+      when: wp_core_installed.rc != 0
+
+    - name: Update WordPress site tagline
+      shell: >
+        sudo -u www-data wp option update blogdescription "{{ wordpress_site_tagline | default('My awesome website') }}"
+        --path="{{ document_root }}"
+      when: wordpress_site_tagline is defined
+
+    - name: Install WordPress theme
+      shell: >
+        sudo -u www-data wp theme install {{ wordpress_theme }}
+        --activate
+        --path="{{ document_root }}"
+      when: wordpress_theme is defined and wordpress_theme != ""
+
+    - name: Install WordPress plugins
+      shell: >
+        sudo -u www-data wp plugin install {{ item }}
+        --activate
+        --path="{{ document_root }}"
+      loop: "{{ wordpress_plugins | default([]) }}"
+      when: wordpress_plugins is defined and wordpress_plugins | length > 0
+
+    - name: Get installed WordPress version
+      shell: sudo -u www-data wp core version --path="{{ document_root }}"
+      register: installed_wp_version
+      changed_when: false
+      failed_when: false
+
+    - name: Configure Nginx for WordPress
+      template:
+        src: templates/nginx-wordpress.conf.j2
+        dest: /etc/nginx/sites-available/wordpress
+        mode: '0644'
+
+    - name: Enable WordPress site
+      file:
+        src: /etc/nginx/sites-available/wordpress
+        dest: /etc/nginx/sites-enabled/wordpress
+        state: link
+
+    - name: Remove default Nginx site
+      file:
+        path: /etc/nginx/sites-enabled/default
+        state: absent
+
+    - name: Test Nginx configuration
+      command: nginx -t
+      register: nginx_test
+      failed_when: nginx_test.rc != 0
+
+    - name: Restart Nginx service
+      systemd:
+        name: nginx
+        state: restarted
+      when: nginx_test.rc == 0
+
+    - name: Display WordPress installation info
+      debug:
+        msg:
+          - "WordPress installation completed successfully!"
+          - "Site Name: {{ wordpress_site_name }}"
+          - "Admin User: {{ wordpress_admin_user }}"
+          - "Site URL: {{ wordpress_site_url }}"
+          - "Document Root: {{ document_root }}"
+          - "WordPress Version: {{ installed_wp_version.stdout if installed_wp_version is defined else 'Unknown' }}"
+
+  handlers:
+    - name: restart nginx
+      systemd:
+        name: nginx
+        state: restarted
+
+    - name: restart php-fpm
+      systemd:
+        name: php{{ php_version | default('8.3') }}-fpm
+        state: restarted
